@@ -1,6 +1,6 @@
 
 from pathlib import Path
-
+import polars as pl
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -92,12 +92,12 @@ HAYSTACK = (BUSINESSES[SEARCH_FIELDS].astype(str)
             .agg(" ".join, axis=1).str.lower())
 
 MAX_CARDS = 24  # cap on cards rendered at once
-
+LOCAL_PATH_DATA = pl.read_csv(Path(__file__).parent / ".." / "datafiles" / "yelp_reviews_clean_CA.csv")
 WWW = Path(__file__).parent / "www"
 WWW.mkdir(exist_ok=True)  # static_assets needs the directory to exist
 
 # --------------------------------------------------------------------------- #
-# Model artefacts. Top-level code in Core runs ONCE per process, not per
+# Model artifacts. Top-level code in Core runs ONCE per process, not per
 # session — this is where real loading belongs, e.g.
 #     RESULTS = {name: joblib.load(f"artifacts/{name}.pkl") for name in ...}
 # --------------------------------------------------------------------------- #
@@ -256,9 +256,8 @@ def business_card(row) -> ui.Tag:
         class_="mb-3",
     )
 
-
-overview_tab = ui.nav_panel(
-    "Overview",
+home_tab = ui.nav_panel(
+    "Home",
     ui.tags.style(CSS),
     ui.div(
         ui.span("Yelp review dataset", class_="eyebrow"),
@@ -323,10 +322,18 @@ repo_tab = ui.nav_panel(
     ),
 )
 
+data_tab = ui.nav_panel(
+    "Data",
+    ui.page_fluid(
+        ui.output_data_frame("data_table")
+    )
+)
+
 app_ui = ui.page_navbar(
-    overview_tab,
+    home_tab,
     results_tab,
     repo_tab,
+    data_tab,
     title="Yelp:TLDR",
     id="tabs",
     fillable=False,
@@ -401,5 +408,12 @@ def server(input, output, session):
             })
         return render.DataGrid(pd.DataFrame(rows), width="100%")
 
-
+    @render.data_frame
+    def data_table():
+        '''
+        Currently only loading in the first 1000 entires, we can work out a pagination schema leveraging
+        polaris, and offsets if we want
+        :return:
+        '''
+        return render.DataGrid(LOCAL_PATH_DATA.head(1000), width="100%", height="1000px", filters=True)
 app = App(app_ui, server, static_assets=WWW)
