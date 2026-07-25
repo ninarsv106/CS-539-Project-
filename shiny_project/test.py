@@ -415,5 +415,5 @@ def server(input, output, session):
         polaris, and offsets if we want
         :return:
         '''
-        return render.DataGrid(LOCAL_PATH_DATA.head(1000), width="100%", height="1000px", filters=True)
+        return render.DataGrid(LOCAL_PATH_DATA.head(10000), width="100%", height="1000px", filters=True)
 app = App(app_ui, server, static_assets=WWW)
