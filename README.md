@@ -3,6 +3,8 @@
 1. `python -m venv .venv`
 2.  For Linux `source .venv/bin/activate`
 3.  For Windows `.venv\Scripts\Activate.ps1`
+4.  `pip install -r requirements.txt`
+
 
 
 ### To run the Shiny app locally for testing, follow these steps
