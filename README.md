@@ -6,7 +6,7 @@
 4.  `pip install -r requirements.txt`
 
 ### Getting the Data
-1. Download the data from the dataset link in `datafiles/Dataset_download_link`
+1. Download the data from the dataset link in `datafiles/Dataset_download_link.txt`
 2. Place the `yelp_reviews_clean_CA.csv` in the folder `datafiles/yelp_reviews_clean_CA.csv`
 
 ### To run the Shiny app locally for testing, follow these steps
