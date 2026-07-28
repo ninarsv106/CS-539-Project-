@@ -1,4 +1,5 @@
 # CS-539-Project-
+Website link: https://konstantina-rasvani.shinyapps.io/yelp-tldr1/
 ### Installing the Environment
 1. `python -m venv .venv`
 2.  For Linux `source .venv/bin/activate`
