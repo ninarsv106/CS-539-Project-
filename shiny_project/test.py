@@ -1,10 +1,11 @@
-
+import os
 from pathlib import Path
 import polars as pl
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from shiny import App, reactive, render, ui
+import json
 
 # --------------------------------------------------------------------------- #
 # Palette / theming
@@ -120,6 +121,9 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "datafiles"
 CLEAN_REVIEWS_PATH = DATA_DIR / "yelp_reviews_clean_CA.csv"
 EMOTION_REVIEWS_PATH = DATA_DIR / "yelp_reviews_with_hf_emotions.csv"
 EMOTION_SUMMARY_PATH = DATA_DIR / "yelp_all_business_emotion_summary.csv"
+SENTIMENT_PREDICTION_PATH = DATA_DIR / "flan_t5" / "flan_t5_sentiment.csv"
+SUMMARY_PATH = DATA_DIR / "flan_t5" / "flan_t5_summary.csv"
+FLAN_T5_METRICS = DATA_DIR / "flan_t5"/ "metrics.json"
 
 EMOTIONS = [
     "anger",
@@ -131,6 +135,30 @@ EMOTIONS = [
     "surprise",
 ]
 
+def flan_data_loader():
+    try:
+        sentiment = pd.read_csv(SENTIMENT_PREDICTION_PATH)
+        summary = pd.read_csv(SUMMARY_PATH)
+        sentiment["date"] = pd.to_datetime(sentiment["date"], errors="coerce")
+        sentiment = sentiment.dropna(subset=["date"])
+    except Exception as e:
+        raise e
+    return sentiment, summary
+
+def _safe_freq(freq):
+    """pandas >= 2.2 wants 'ME'/'QE'/'YE'; older versions want 'M'/'Q'/'Y'.
+    Try the modern alias, fall back to the legacy one so the app runs on both."""
+    try:
+        pd.Grouper(freq=freq)
+        return freq
+    except ValueError:
+        return {"ME": "M", "QE": "Q", "YE": "Y"}.get(freq, freq)
+
+FLAN_SENTIMENT, FLAN_SUMMARY = flan_data_loader()
+SENTIMENT_BUSINESSES = sorted(FLAN_SENTIMENT["business_name"].dropna().unique().tolist())
+SUMMARY_BUSINESSES = sorted(FLAN_SUMMARY["business_name"].dropna().unique().tolist())
+SENTIMENT_LABELS = ["negative", "neutral", "positive"]
+SENTIMENT_COLORS = {"negative": "#d62728", "neutral": "#7f7f7f", "positive": "#2ca02c"}
 
 def require_data_file(path: Path, description: str) -> Path:
     """Raise a clear startup error when a required project data file is missing."""
@@ -581,6 +609,88 @@ MODEL_CHARTS = {
 # --------------------------------------------------------------------------- #
 # UI — all layout in one place, which is the reason to prefer Core here
 # --------------------------------------------------------------------------- #
+emotion_page = ui.TagList(
+ui.layout_columns(
+        ui.value_box(
+            "Reviews analyzed",
+            ui.output_text("selected_review_count"),
+        ),
+        ui.value_box(
+            "Matching business locations",
+            ui.output_text("selected_location_count"),
+        ),
+        ui.value_box(
+            "Highest average emotion",
+            ui.output_text("highest_emotion_value"),
+        ),
+        col_widths=[4, 4, 4],
+    ),
+    ui.card(
+        ui.card_header("Average emotion distribution"),
+        ui.output_plot(
+            "average_emotion_plot",
+            height="500px",
+        ),
+        ui.p(
+            ui.output_text("highest_emotion_sentence", inline=True),
+            class_="data-note",
+        ),
+        class_="mb-4",
+    ),
+    ui.h3("Review-level emotion score distributions", class_="mt-4 mb-3"),
+    ui.layout_columns(
+        *[
+            ui.card(
+                ui.card_header(emotion.capitalize()),
+                ui.output_plot(
+                    f"emotion_hist_{emotion}",
+                    height="390px",
+                ),
+            )
+            for emotion in EMOTIONS
+        ],
+        col_widths=[6, 6, 6, 6, 6, 6, 12],
+    ),
+)
+
+sentiment_page = ui.TagList(
+ui.layout_columns(
+        ui.value_box(
+            "Reviews analyzed",
+            ui.output_text("_flan_selected_review_count"),
+        ),
+        ui.value_box(
+            "Matching business locations",
+            ui.output_text("_flan_selected_location_count"),
+        ),
+        ui.value_box(
+            "Overall sentiment score",
+            ui.output_text("overall_sentiment"),
+        ),
+    ui.input_selectize(
+        "business", "Search a business:",
+        choices=SUMMARY_BUSINESSES, multiple=False,
+        options={"placeholder": "type to search..."},
+    ),
+    ui.input_radio_buttons(
+        "mode", "Chart shows:",
+        {"count": "Review counts", "pct": "Sentiment %"},
+        selected="count",
+    ),
+    ui.input_select(
+        "freq", "Time bucket:",
+        {"ME": "Monthly", "QE": "Quarterly", "YE": "Yearly"},
+        selected="ME",
+    ),
+    width=500,
+    col_widths=[4, 4, 4],
+    ),
+    ui.h2("Business Review Explorer"),
+    ui.output_ui("overview"),
+    ui.output_plot("trend"),
+    ui.output_ui("summary_card"),
+    ui.output_plot("sentiment_bar_graph"),
+)
 home_tab = ui.nav_panel(
     "Home",
     ui.tags.style(CSS),
@@ -617,59 +727,25 @@ home_tab = ui.nav_panel(
                     ui.input_select(
                         "task",
                         "Task",
-                        choices=["Emotion Classification"],
+                        choices=["Emotion Classification", "Sentiment Analysis/Summarization"],
                         selected="Emotion Classification",
                         width="100%",
                     ),
                     class_="task-filter-column",
                 ),
+                ui.navset_hidden(
+                    ui.nav_panel("Sentiment Analysis/Summarization", sentiment_page),
+                    ui.nav_panel("Emotion Classification",emotion_page),
+                    id="page",
+                ),
                 col_widths=[8, 4],
             ),
             class_="mb-4 dashboard-filters",
         ),
-        ui.layout_columns(
-            ui.value_box(
-                "Reviews analyzed",
-                ui.output_text("selected_review_count"),
-            ),
-            ui.value_box(
-                "Matching business locations",
-                ui.output_text("selected_location_count"),
-            ),
-            ui.value_box(
-                "Highest average emotion",
-                ui.output_text("highest_emotion_value"),
-            ),
-            col_widths=[4, 4, 4],
-        ),
-        ui.card(
-            ui.card_header("Average emotion distribution"),
-            ui.output_plot(
-                "average_emotion_plot",
-                height="500px",
-            ),
-            ui.p(
-                ui.output_text("highest_emotion_sentence", inline=True),
-                class_="data-note",
-            ),
-            class_="mb-4",
-        ),
-        ui.h3("Review-level emotion score distributions", class_="mt-4 mb-3"),
-        ui.layout_columns(
-            *[
-                ui.card(
-                    ui.card_header(emotion.capitalize()),
-                    ui.output_plot(
-                        f"emotion_hist_{emotion}",
-                        height="390px",
-                    ),
-                )
-                for emotion in EMOTIONS
-            ],
-            col_widths=[6, 6, 6, 6, 6, 6, 12],
-        ),
+
     ),
 )
+
 
 about_tab = ui.nav_panel(
     "About",
@@ -961,6 +1037,28 @@ def server(input, output, session):
         return selected.row(0, named=True)
 
     @reactive.calc
+    def reactive_selected_business_summary() -> dict:
+        business_name = input.business()
+
+        selected = EMOTION_SUMMARY.filter(
+            pl.col("business_name") == business_name
+        )
+
+        if selected.is_empty():
+            raise ValueError(
+                f"No precomputed business-level emotion summary was found "
+                f"for '{business_name}'."
+            )
+
+        return selected.row(0, named=True)
+    @reactive.calc
+    def selected_review_overall_sentiment():
+        business_name = input.business()
+        business_sentiments = FLAN_SENTIMENT[FLAN_SENTIMENT["business_name"] == business_name]
+        label_counts = business_sentiments["prediction_sentiment"].value_counts()
+        return label_counts.idxmax()
+
+    @reactive.calc
     def selected_review_emotions() -> pl.DataFrame:
         business_name = selected_business_name()
 
@@ -978,17 +1076,112 @@ def server(input, output, session):
             )
 
         return selected
+    @reactive.calc
+    def all_business_reviews():
+        """
+        This returns all reviews not just the overall sentiment.
+        """
+        business_name = input.business()
+        if not business_name:
+            return None
+        return FLAN_SENTIMENT[FLAN_SENTIMENT["business_name"] == business_name]
 
     @render.text
     def selected_review_count():
         return f"{int(selected_business_summary()['review_count']):,}"
+    @render.text
+    def _flan_selected_review_count():
+        return f"{int(reactive_selected_business_summary()['review_count']):,}"
 
     @render.text
     def selected_location_count():
         return (
             f"{int(selected_business_summary()['matching_business_id_count']):,}"
         )
+    @render.text
+    def _flan_selected_location_count():
+        return f"{int(reactive_selected_business_summary()['matching_business_id_count']):,}"
 
+    @render.text
+    def overall_sentiment():
+        return selected_review_overall_sentiment()
+
+    @render.ui
+    def overview():
+        business_name = input.business()
+        if not business_name:
+            return ui.p("Select a business from the sidebar to see its sentiment "
+                        "trend and summary.")
+        sub = all_business_reviews()
+        return ui.tags.div(
+            ui.h3(business_name),
+            ui.p(f"{len(sub)} reviews on record "
+                 f"({sub['date'].min().date()} to {sub['date'].max().date()})"),
+        )
+    @render.plot
+    def sentiment_bar_graph():
+        all_reviews = all_business_reviews()
+        counts = (all_reviews["prediction_sentiment"].value_counts().reindex(SENTIMENT_LABELS, fill_value=0))
+        fig,ax = plt.subplots(figsize=(5,4))
+        ax.bar(counts.index,counts.values,color=[SENTIMENT_COLORS[i] for i in counts.index])
+        ax.set_ylabel("number of reviews")
+        ax.set_title(f"Sentiment distribution — {input.business()}")
+        for i, v in enumerate(counts.values):
+            ax.text(i, v, str(int(v)), ha="center", va="bottom")
+        fig.tight_layout()
+        return fig
+
+    @render.plot
+    def trend():
+        sub =  all_business_reviews()
+        if sub is None or sub.empty:
+            return None
+        freq = _safe_freq(input.freq())
+        monthly = (sub.set_index("date")
+                   .groupby([pd.Grouper(freq=freq), "prediction_sentiment"])
+                   .size().unstack(fill_value=0))
+        # keep a stable label order + colors
+        for lab in SENTIMENT_LABELS:
+            if lab not in monthly.columns:
+                monthly[lab] = 0
+        monthly = monthly[SENTIMENT_LABELS]
+
+        if input.mode() == "pct":
+            totals = monthly.sum(axis=1).replace(0, 1)
+            monthly = monthly.div(totals, axis=0) * 100
+
+        fig, ax = plt.subplots(figsize=(9, 4.5))
+        monthly.plot(kind="area", stacked=True, ax=ax,
+                     color=[SENTIMENT_COLORS[l] for l in SENTIMENT_LABELS])
+        ax.set_xlabel("date")
+        ax.set_ylabel("% of reviews" if input.mode() == "pct" else "reviews")
+        ax.set_title(f"Predicted sentiment over time — {input.business()}")
+        ax.legend(title="sentiment", loc="upper left")
+        fig.tight_layout()
+        return fig
+
+    @render.ui
+    def summary_card():
+        business_name = input.business()
+        if not business_name:
+            return None
+        row = FLAN_SUMMARY[FLAN_SUMMARY["business_name"] == business_name]
+        if row.empty:
+            return ui.tags.div(
+                ui.h4("Summary"),
+                ui.p(ui.em("No summary available for this business "
+                           "(too few reviews to summarize).")),
+            )
+        r = row.iloc[0]
+        return ui.tags.div(
+            ui.h4("Overall summary"),
+            ui.p(r["summary"]),
+            ui.p(ui.tags.small(
+                f"Based on {int(r['n_reviews'])} reviews — "
+                f"{r["sentiment_distro"]}%, "
+            )),
+            style="background:#f6f6f6; padding:12px; border-radius:8px; margin-top:12px;",
+        )
     @render.text
     def highest_emotion_value():
         row = selected_business_summary()
@@ -1067,6 +1260,9 @@ def server(input, output, session):
             selected_business_name(),
         )
 
+    @reactive.effect
+    def _sync_page():
+        ui.update_navs("page", selected=input.task())
     # ---- Models tab --------------------------------------------------------
     @reactive.calc
     def current():
