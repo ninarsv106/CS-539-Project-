@@ -750,7 +750,7 @@ home_tab = ui.nav_panel(
                         multiple=False,
                         options={
                             "placeholder": "Type a business name...",
-                            "maxOptions": 100,
+                            "maxOptions": len(BUSINESS_CHOICES),
                             "dropdownParent": "body",
                         },
                         width="100%",
