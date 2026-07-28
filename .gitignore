@@ -2,3 +2,6 @@
 /.idea/
 __pycache__/
 /datafiles/
+*.pt
+/models/flan_t5_model/flant5-reviews/
+*.safetensors
