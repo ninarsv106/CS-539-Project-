@@ -15,3 +15,6 @@
 1. `pip install shiny pandas numpy matplotlib polars`
 1. Navigate to  `shiny_project/`
 2.  Then run on the command line `shiny run --reload --launch-browser test.py`
+
+### Model Location:
+1. The trained `flan-t5-base` model has been uploaded to `https://huggingface.co/SSDevForge/flan-t5-base`

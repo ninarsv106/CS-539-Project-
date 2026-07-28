@@ -1,10 +1,11 @@
-
+import os
 from pathlib import Path
 import polars as pl
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from shiny import App, reactive, render, ui
+import json
 
 # --------------------------------------------------------------------------- #
 # Palette / theming
@@ -134,6 +135,9 @@ TOPIC_MODEL_CONFIG = {
         "bar_color": WARM,
     },
 }
+SENTIMENT_PREDICTION_PATH = DATA_DIR / "flan_t5" / "flan_t5_sentiment.csv"
+SUMMARY_PATH = DATA_DIR / "flan_t5" / "flan_t5_summary.csv"
+FLAN_T5_METRICS = DATA_DIR / "flan_t5"/ "metrics.json"
 
 EMOTIONS = [
     "anger",
@@ -145,6 +149,30 @@ EMOTIONS = [
     "surprise",
 ]
 
+def flan_data_loader():
+    try:
+        sentiment = pd.read_csv(SENTIMENT_PREDICTION_PATH)
+        summary = pd.read_csv(SUMMARY_PATH)
+        sentiment["date"] = pd.to_datetime(sentiment["date"], errors="coerce")
+        sentiment = sentiment.dropna(subset=["date"])
+    except Exception as e:
+        raise e
+    return sentiment, summary
+
+def _safe_freq(freq):
+    """pandas >= 2.2 wants 'ME'/'QE'/'YE'; older versions want 'M'/'Q'/'Y'.
+    Try the modern alias, fall back to the legacy one so the app runs on both."""
+    try:
+        pd.Grouper(freq=freq)
+        return freq
+    except ValueError:
+        return {"ME": "M", "QE": "Q", "YE": "Y"}.get(freq, freq)
+
+FLAN_SENTIMENT, FLAN_SUMMARY = flan_data_loader()
+SENTIMENT_BUSINESSES = sorted(FLAN_SENTIMENT["business_name"].dropna().unique().tolist())
+SUMMARY_BUSINESSES = sorted(FLAN_SUMMARY["business_name"].dropna().unique().tolist())
+SENTIMENT_LABELS = ["negative", "neutral", "positive"]
+SENTIMENT_COLORS = {"negative": "#d62728", "neutral": "#7f7f7f", "positive": "#2ca02c"}
 
 def require_data_file(path: Path, description: str) -> Path:
     """Raise a clear startup error when a required project data file is missing."""
@@ -396,14 +424,64 @@ DISTILBERT_RESULTS = {
     "loss_image": WWW / "distilbert_yelp_ca_training_validation_loss.png",
     "confusion_image": WWW / "distilbert_yelp_ca_confusion_matrix.png",
 }
-
+FLANT5_CLASS_METRICS = pd.DataFrame(
+    [
+        {"Class": "Negative", "Precision": 0.9032258064516129, "Recall": 0.9081081081081082,
+         "F1": 0.9056603773584906, "Support": 185.0},
+        {"Class": "Neutral", "Precision": 0.632183908045977, "Recall":  0.5913978494623656,
+         "F1": 0.6111111111111112, "Support": 93.0},
+        {"Class": "Positive", "Precision":0.9656593406593407, "Recall": 0.9723374827109267,
+         "F1": 0.968986905582357, "Support": 723.0},
+        {"Class": "Macro average", "Precision":  0.8336896850523102, "Recall": 0.8239478134271335,
+         "F1": 0.828586131350653, "Support":  1001.0},
+        {"Class": "Weighted average", "Precision": 0.9231384424960315, "Recall": 0.9250749250749251,
+         "F1": 0.9240340018788193, "Support": 1001.0},
+    ]
+)
+FLANT5BASE_RESULTS = {
+    "kind": "flan-t5",
+    "model_name": "flan-t5-base",
+    "accuracy": 0.9250749250749251,
+    "precision_macro": 0.8336896850523102,
+    "recall_macro": 0.8239478134271335,
+    "f1_macro": 0.828586131350653,
+    "precision_weighted": 0.9231384424960315,
+    "recall_weighted": 0.9250749250749251,
+    "f1_weighted": 0.9240340018788193,
+    "test_loss": 0.691561,
+    "confusion_matrix": {
+        "labels": [
+            "negative",
+            "neutral",
+            "positive"
+        ],
+        "matrix": [
+            [
+                168,
+                14,
+                3
+            ],
+            [
+                16,
+                55,
+                22
+            ],
+            [
+                2,
+                18,
+                703
+            ]
+        ]
+    },
+    "class_names": ["Negative", "Neutral", "Positive"],
+    "class_metrics": FLANT5_CLASS_METRICS,
+    "loss_image": WWW / "flant5_learning_curve.png",
+    "confusion_image": WWW / "flan_t5_confusion_matrix.png",
+}
 
 RESULTS = {
     "DistilBERT": DISTILBERT_RESULTS,
-    "Logistic regression": _fake_results(1, 0.55),
-    "Random forest": _fake_results(2, 0.75),
-    "Gradient boosting": _fake_results(3, 0.88),
-    "Neural net (MLP)": _fake_results(4, 0.80),
+    "FlanT5": FLANT5BASE_RESULTS,
 }
 
 
@@ -492,7 +570,7 @@ def plot_roc(res, annotate=True):
 
 
 def plot_confusion(res, annotate=True):
-    if res["kind"] == "distilbert":
+    if res["kind"] == "distilbert" or res["kind"] == "flan-t5":
         image_path = res["confusion_image"]
         if image_path.exists():
             return plot_static_notebook_image(image_path)
@@ -547,7 +625,7 @@ def plot_confusion(res, annotate=True):
 
 
 def plot_learning_curve(res, annotate=True):
-    if res["kind"] == "distilbert":
+    if res["kind"] == "distilbert" or res["kind"] == "flan-t5":
         image_path = res["loss_image"]
         if not image_path.exists():
             raise FileNotFoundError(
@@ -575,13 +653,13 @@ def plot_learning_curve(res, annotate=True):
 
 
 def plot_class_metrics(res, annotate=True):
-    if res["kind"] != "distilbert":
+    if res["kind"] != "distilbert" and res["kind"] != "flan-t5":
         fig, ax = plt.subplots(figsize=(7, 4.5))
         ax.text(
             0.5,
             0.5,
             "Class-specific precision, recall, and F1\n"
-            "are available for the DistilBERT model.",
+            "are available for the DistilBERT model, and FLAN-T5 model.",
             ha="center",
             va="center",
             fontsize=13,
@@ -668,26 +746,11 @@ MODEL_CHARTS = {
         "Confusion matrix",
         "Class precision, recall, and F1",
     ],
-    "Logistic regression": [
-        "ROC curve",
-        "Confusion matrix",
+    "FlanT5": [
         "Training and validation loss",
-    ],
-    "Random forest": [
-        "ROC curve",
         "Confusion matrix",
-        "Training and validation loss",
-    ],
-    "Gradient boosting": [
-        "ROC curve",
-        "Confusion matrix",
-        "Training and validation loss",
-    ],
-    "Neural net (MLP)": [
-        "ROC curve",
-        "Confusion matrix",
-        "Training and validation loss",
-    ],
+        "Class precision, recall, and F1",
+    ]
 }
 
 for model_name, config in TOPIC_MODEL_CONFIG.items():
@@ -710,6 +773,88 @@ for model_name, config in TOPIC_MODEL_CONFIG.items():
 # --------------------------------------------------------------------------- #
 # UI — all layout in one place, which is the reason to prefer Core here
 # --------------------------------------------------------------------------- #
+emotion_page = ui.TagList(
+ui.layout_columns(
+        ui.value_box(
+            "Reviews analyzed",
+            ui.output_text("selected_review_count"),
+        ),
+        ui.value_box(
+            "Matching business locations",
+            ui.output_text("selected_location_count"),
+        ),
+        ui.value_box(
+            "Highest average emotion",
+            ui.output_text("highest_emotion_value"),
+        ),
+        col_widths=[4, 4, 4],
+    ),
+    ui.card(
+        ui.card_header("Average emotion distribution"),
+        ui.output_plot(
+            "average_emotion_plot",
+            height="500px",
+        ),
+        ui.p(
+            ui.output_text("highest_emotion_sentence", inline=True),
+            class_="data-note",
+        ),
+        class_="mb-4",
+    ),
+    ui.h3("Review-level emotion score distributions", class_="mt-4 mb-3"),
+    ui.layout_columns(
+        *[
+            ui.card(
+                ui.card_header(emotion.capitalize()),
+                ui.output_plot(
+                    f"emotion_hist_{emotion}",
+                    height="390px",
+                ),
+            )
+            for emotion in EMOTIONS
+        ],
+        col_widths=[6, 6, 6, 6, 6, 6, 12],
+    ),
+)
+
+sentiment_page = ui.TagList(
+ui.layout_columns(
+        ui.value_box(
+            "Reviews analyzed",
+            ui.output_text("_flan_selected_review_count"),
+        ),
+        ui.value_box(
+            "Matching business locations",
+            ui.output_text("_flan_selected_location_count"),
+        ),
+        ui.value_box(
+            "Overall sentiment score",
+            ui.output_text("overall_sentiment"),
+        ),
+    ui.input_selectize(
+        "business", "Search a business:",
+        choices=SUMMARY_BUSINESSES, multiple=False,
+        options={"placeholder": "type to search..."},
+    ),
+    ui.input_radio_buttons(
+        "mode", "Chart shows:",
+        {"count": "Review counts", "pct": "Sentiment %"},
+        selected="count",
+    ),
+    ui.input_select(
+        "freq", "Time bucket:",
+        {"ME": "Monthly", "QE": "Quarterly", "YE": "Yearly"},
+        selected="ME",
+    ),
+    width=500,
+    col_widths=[4, 4, 4],
+    ),
+    ui.h2("Business Review Explorer"),
+    ui.output_ui("overview"),
+    ui.output_plot("trend"),
+    ui.output_ui("summary_card"),
+    ui.output_plot("sentiment_bar_graph"),
+)
 home_tab = ui.nav_panel(
     "Home",
     ui.tags.style(CSS),
@@ -735,7 +880,7 @@ home_tab = ui.nav_panel(
                         multiple=False,
                         options={
                             "placeholder": "Type a business name...",
-                            "maxOptions": 100,
+                            "maxOptions": len(BUSINESS_CHOICES),
                             "dropdownParent": "body",
                         },
                         width="100%",
@@ -746,11 +891,16 @@ home_tab = ui.nav_panel(
                     ui.input_select(
                         "task",
                         "Task",
-                        choices=["Emotion Classification"],
+                        choices=["Emotion Classification", "Sentiment Analysis/Summarization"],
                         selected="Emotion Classification",
                         width="100%",
                     ),
                     class_="task-filter-column",
+                ),
+                ui.navset_hidden(
+                    ui.nav_panel("Sentiment Analysis/Summarization", sentiment_page),
+                    ui.nav_panel("Emotion Classification",emotion_page),
+                    id="page",
                 ),
                 col_widths=[8, 4],
             ),
@@ -810,8 +960,10 @@ home_tab = ui.nav_panel(
             ],
             col_widths=[6, 6, 6, 6, 6, 6, 12],
         ),
+
     ),
 )
+
 
 about_tab = ui.nav_panel(
     "About",
@@ -1155,6 +1307,28 @@ def server(input, output, session):
         return selected.row(0, named=True)
 
     @reactive.calc
+    def reactive_selected_business_summary() -> dict:
+        business_name = input.business()
+
+        selected = EMOTION_SUMMARY.filter(
+            pl.col("business_name") == business_name
+        )
+
+        if selected.is_empty():
+            raise ValueError(
+                f"No precomputed business-level emotion summary was found "
+                f"for '{business_name}'."
+            )
+
+        return selected.row(0, named=True)
+    @reactive.calc
+    def selected_review_overall_sentiment():
+        business_name = input.business()
+        business_sentiments = FLAN_SENTIMENT[FLAN_SENTIMENT["business_name"] == business_name]
+        label_counts = business_sentiments["prediction_sentiment"].value_counts()
+        return label_counts.idxmax()
+
+    @reactive.calc
     def selected_review_emotions() -> pl.DataFrame:
         business_name = selected_business_name()
 
@@ -1172,17 +1346,112 @@ def server(input, output, session):
             )
 
         return selected
+    @reactive.calc
+    def all_business_reviews():
+        """
+        This returns all reviews not just the overall sentiment.
+        """
+        business_name = input.business()
+        if not business_name:
+            return None
+        return FLAN_SENTIMENT[FLAN_SENTIMENT["business_name"] == business_name]
 
     @render.text
     def selected_review_count():
         return f"{int(selected_business_summary()['review_count']):,}"
+    @render.text
+    def _flan_selected_review_count():
+        return f"{int(reactive_selected_business_summary()['review_count']):,}"
 
     @render.text
     def selected_location_count():
         return (
             f"{int(selected_business_summary()['matching_business_id_count']):,}"
         )
+    @render.text
+    def _flan_selected_location_count():
+        return f"{int(reactive_selected_business_summary()['matching_business_id_count']):,}"
 
+    @render.text
+    def overall_sentiment():
+        return selected_review_overall_sentiment()
+
+    @render.ui
+    def overview():
+        business_name = input.business()
+        if not business_name:
+            return ui.p("Select a business from the sidebar to see its sentiment "
+                        "trend and summary.")
+        sub = all_business_reviews()
+        return ui.tags.div(
+            ui.h3(business_name),
+            ui.p(f"{len(sub)} reviews on record "
+                 f"({sub['date'].min().date()} to {sub['date'].max().date()})"),
+        )
+    @render.plot
+    def sentiment_bar_graph():
+        all_reviews = all_business_reviews()
+        counts = (all_reviews["prediction_sentiment"].value_counts().reindex(SENTIMENT_LABELS, fill_value=0))
+        fig,ax = plt.subplots(figsize=(5,4))
+        ax.bar(counts.index,counts.values,color=[SENTIMENT_COLORS[i] for i in counts.index])
+        ax.set_ylabel("number of reviews")
+        ax.set_title(f"Sentiment distribution — {input.business()}")
+        for i, v in enumerate(counts.values):
+            ax.text(i, v, str(int(v)), ha="center", va="bottom")
+        fig.tight_layout()
+        return fig
+
+    @render.plot
+    def trend():
+        sub =  all_business_reviews()
+        if sub is None or sub.empty:
+            return None
+        freq = _safe_freq(input.freq())
+        monthly = (sub.set_index("date")
+                   .groupby([pd.Grouper(freq=freq), "prediction_sentiment"])
+                   .size().unstack(fill_value=0))
+        # keep a stable label order + colors
+        for lab in SENTIMENT_LABELS:
+            if lab not in monthly.columns:
+                monthly[lab] = 0
+        monthly = monthly[SENTIMENT_LABELS]
+
+        if input.mode() == "pct":
+            totals = monthly.sum(axis=1).replace(0, 1)
+            monthly = monthly.div(totals, axis=0) * 100
+
+        fig, ax = plt.subplots(figsize=(9, 4.5))
+        monthly.plot(kind="area", stacked=True, ax=ax,
+                     color=[SENTIMENT_COLORS[l] for l in SENTIMENT_LABELS])
+        ax.set_xlabel("date")
+        ax.set_ylabel("% of reviews" if input.mode() == "pct" else "reviews")
+        ax.set_title(f"Predicted sentiment over time — {input.business()}")
+        ax.legend(title="sentiment", loc="upper left")
+        fig.tight_layout()
+        return fig
+
+    @render.ui
+    def summary_card():
+        business_name = input.business()
+        if not business_name:
+            return None
+        row = FLAN_SUMMARY[FLAN_SUMMARY["business_name"] == business_name]
+        if row.empty:
+            return ui.tags.div(
+                ui.h4("Summary"),
+                ui.p(ui.em("No summary available for this business "
+                           "(too few reviews to summarize).")),
+            )
+        r = row.iloc[0]
+        return ui.tags.div(
+            ui.h4("Overall summary"),
+            ui.p(r["summary"]),
+            ui.p(ui.tags.small(
+                f"Based on {int(r['n_reviews'])} reviews — "
+                f"{r["sentiment_distro"]}%, "
+            )),
+            style="background:#f6f6f6; padding:12px; border-radius:8px; margin-top:12px;",
+        )
     @render.text
     def highest_emotion_value():
         row = selected_business_summary()
@@ -1261,6 +1530,9 @@ def server(input, output, session):
             selected_business_name(),
         )
 
+    @reactive.effect
+    def _sync_page():
+        ui.update_navs("page", selected=input.task())
     # ---- Models tab --------------------------------------------------------
     @reactive.calc
     def current():
@@ -1287,7 +1559,7 @@ def server(input, output, session):
     def metric_boxes():
         res = current()
 
-        if res["kind"] == "distilbert":
+        if res["kind"] == "distilbert" or res["kind"] == "flan-t5":
             return ui.layout_columns(
                 ui.value_box("Accuracy", f"{res['accuracy']:.1%}"),
                 ui.value_box("Macro F1", f"{res['f1_macro']:.3f}"),
@@ -1319,8 +1591,7 @@ def server(input, output, session):
     @render.data_frame
     def class_metrics():
         res = current()
-
-        if res["kind"] == "distilbert":
+        if res["kind"] == "distilbert" or res["kind"] == "flan-t5":
             table = res["class_metrics"].copy()
             for column in ["Precision", "Recall", "F1"]:
                 table[column] = table[column].map(lambda value: f"{value:.3f}")
@@ -1330,7 +1601,7 @@ def server(input, output, session):
                 {
                     "Information": [
                         "Class-specific metrics are currently available "
-                        "for DistilBERT."
+                        "for DistilBERT, and Flan-T5.",
                     ]
                 }
             )
@@ -1342,7 +1613,7 @@ def server(input, output, session):
         rows = []
 
         for name, res in RESULTS.items():
-            if res["kind"] == "distilbert":
+            if res["kind"] == "distilbert" or res["kind"] == "flan-t5":
                 rows.append(
                     {
                         "Model": name,
