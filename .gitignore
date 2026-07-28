@@ -1,0 +1,8 @@
+/.venv/
+/.idea/
+__pycache__/
+/datafiles/yelp_reviews_clean_CA.csv
+*.pt
+/models/flan_t5_model/flant5-reviews/
+*.safetensors
+/datafiles/yelp_reviews_with_hf_emotions.csv

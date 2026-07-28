@@ -1,0 +1,73 @@
+{
+  "timestamp": "2026-07-27T23:04:33",
+  "model": "google/flan-t5-base",
+  "n_examples": 1001,
+  "accuracy": 0.9250749250749251,
+  "macro": {
+    "precision": 0.8336896850523102,
+    "recall": 0.8239478134271335,
+    "f1": 0.828586131350653
+  },
+  "weighted": {
+    "precision": 0.9231384424960315,
+    "recall": 0.9250749250749251,
+    "f1": 0.9240340018788193
+  },
+  "per_class": {
+    "negative": {
+      "precision": 0.9032258064516129,
+      "recall": 0.9081081081081082,
+      "f1-score": 0.9056603773584906,
+      "support": 185.0
+    },
+    "neutral": {
+      "precision": 0.632183908045977,
+      "recall": 0.5913978494623656,
+      "f1-score": 0.6111111111111112,
+      "support": 93.0
+    },
+    "positive": {
+      "precision": 0.9656593406593407,
+      "recall": 0.9723374827109267,
+      "f1-score": 0.968986905582357,
+      "support": 723.0
+    },
+    "accuracy": 0.9250749250749251,
+    "macro avg": {
+      "precision": 0.8336896850523102,
+      "recall": 0.8239478134271335,
+      "f1-score": 0.828586131350653,
+      "support": 1001.0
+    },
+    "weighted avg": {
+      "precision": 0.9231384424960315,
+      "recall": 0.9250749250749251,
+      "f1-score": 0.9240340018788193,
+      "support": 1001.0
+    }
+  },
+  "confusion_matrix": {
+    "labels": [
+      "negative",
+      "neutral",
+      "positive"
+    ],
+    "matrix": [
+      [
+        168,
+        14,
+        3
+      ],
+      [
+        16,
+        55,
+        22
+      ],
+      [
+        2,
+        18,
+        703
+      ]
+    ]
+  }
+}
