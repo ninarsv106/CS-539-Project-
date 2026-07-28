@@ -125,6 +125,22 @@ SENTIMENT_PREDICTION_PATH = DATA_DIR / "flan_t5" / "flan_t5_sentiment.csv"
 SUMMARY_PATH = DATA_DIR / "flan_t5" / "flan_t5_summary.csv"
 FLAN_T5_METRICS = DATA_DIR / "flan_t5"/ "metrics.json"
 
+# Topic-modeling outputs generated offline by the BERTopic/FASTopic notebook.
+# The helper supports either datafiles/topic_modeling/, datafiles/yelp_topic_modeling/,
+# or files copied directly into datafiles/.
+def _topic_output_path(filename: str) -> Path:
+    candidates = [
+        DATA_DIR / "topic_modeling" / filename,
+        DATA_DIR / "yelp_topic_modeling" / filename,
+        DATA_DIR / filename,
+    ]
+    return next((path for path in candidates if path.exists()), candidates[0])
+
+
+BUSINESS_TOPICS_PATH = _topic_output_path("business_top_topics.csv")
+BERTOPIC_TOPICS_PATH = _topic_output_path("bertopic_topics.csv")
+TOPIC_MODEL_METRICS_PATH = _topic_output_path("topic_model_comparison.csv")
+
 EMOTIONS = [
     "anger",
     "disgust",
@@ -197,7 +213,116 @@ EMOTION_SUMMARY = (
     .sort("business_name")
 )
 
-BUSINESS_CHOICES = EMOTION_SUMMARY.get_column("business_name").to_list()
+def _read_optional_csv(path: Path, required_columns: set[str]) -> pd.DataFrame:
+    """Load an offline result CSV without preventing the rest of the app from starting."""
+    if not path.exists():
+        return pd.DataFrame(columns=sorted(required_columns))
+
+    frame = pd.read_csv(path)
+    missing = required_columns.difference(frame.columns)
+    if missing:
+        raise ValueError(
+            f"{path.name} is missing required columns: {sorted(missing)}"
+        )
+    return frame
+
+
+BUSINESS_TOPICS = _read_optional_csv(
+    BUSINESS_TOPICS_PATH,
+    {
+        "business_name",
+        "topic_id",
+        "topic_label",
+        "topic_review_count",
+        "topic_share",
+        "topic_rank",
+    },
+)
+
+if not BUSINESS_TOPICS.empty:
+    BUSINESS_TOPICS["business_name"] = (
+        BUSINESS_TOPICS["business_name"].astype(str).str.strip()
+    )
+    for column in [
+        "topic_id",
+        "topic_review_count",
+        "topic_share",
+        "topic_rank",
+        "average_topic_score",
+    ]:
+        if column in BUSINESS_TOPICS.columns:
+            BUSINESS_TOPICS[column] = pd.to_numeric(
+                BUSINESS_TOPICS[column],
+                errors="coerce",
+            )
+
+    # The dashboard intentionally uses only the BERTopic inference export.
+    if "model" in BUSINESS_TOPICS.columns:
+        BUSINESS_TOPICS = BUSINESS_TOPICS[
+            BUSINESS_TOPICS["model"]
+            .astype(str)
+            .str.casefold()
+            .eq("bertopic")
+        ].copy()
+
+
+BERTOPIC_TOPICS = _read_optional_csv(
+    BERTOPIC_TOPICS_PATH,
+    {"topic_id", "topic_label", "top_words"},
+)
+
+if not BERTOPIC_TOPICS.empty:
+    BERTOPIC_TOPICS["topic_id"] = pd.to_numeric(
+        BERTOPIC_TOPICS["topic_id"],
+        errors="coerce",
+    )
+    if "model" in BERTOPIC_TOPICS.columns:
+        BERTOPIC_TOPICS = BERTOPIC_TOPICS[
+            BERTOPIC_TOPICS["model"]
+            .astype(str)
+            .str.casefold()
+            .eq("bertopic")
+        ].copy()
+
+
+BERTOPIC_WORDS_BY_ID = {
+    int(row["topic_id"]): str(row["top_words"])
+    for _, row in BERTOPIC_TOPICS.dropna(subset=["topic_id"]).iterrows()
+}
+
+
+TOPIC_MODEL_METRICS = _read_optional_csv(
+    TOPIC_MODEL_METRICS_PATH,
+    {
+        "model",
+        "fit_documents",
+        "number_of_topics",
+        "c_v",
+        "c_npmi",
+        "u_mass",
+        "topic_diversity",
+        "fit_seconds",
+        "outlier_rate",
+    },
+)
+
+if not TOPIC_MODEL_METRICS.empty:
+    for column in TOPIC_MODEL_METRICS.columns:
+        if column != "model":
+            TOPIC_MODEL_METRICS[column] = pd.to_numeric(
+                TOPIC_MODEL_METRICS[column],
+                errors="coerce",
+            )
+
+
+emotion_businesses = EMOTION_SUMMARY.get_column("business_name").to_list()
+topic_businesses = (
+    BUSINESS_TOPICS["business_name"].dropna().astype(str).tolist()
+    if not BUSINESS_TOPICS.empty
+    else []
+)
+
+BUSINESS_CHOICES = sorted(set(emotion_businesses).union(topic_businesses))
 
 if not BUSINESS_CHOICES:
     raise ValueError(
@@ -287,6 +412,57 @@ def plot_emotion_histogram(
     ax.set_xlim(0, 1)
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
+    fig.tight_layout()
+    return fig
+
+
+def plot_topic_frequency(
+    topic_rows: pd.DataFrame,
+    business_name: str,
+):
+    """Plot the percentage of assigned reviews represented by each BERTopic topic."""
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    if topic_rows.empty:
+        ax.text(
+            0.5,
+            0.5,
+            "No BERTopic results are available for this business.",
+            ha="center",
+            va="center",
+            color=MUTED,
+        )
+        ax.axis("off")
+        return fig
+
+    plot_frame = topic_rows.sort_values(
+        "topic_share",
+        ascending=True,
+    ).copy()
+
+    labels = [
+        f"#{int(rank)}  {label}"
+        for rank, label in zip(
+            plot_frame["topic_rank"],
+            plot_frame["topic_label"],
+        )
+    ]
+    percentages = plot_frame["topic_share"].astype(float) * 100
+
+    bars = ax.barh(labels, percentages, color=ACCENT)
+    ax.set_title(
+        f"Topic Frequency for {business_name}",
+        loc="left",
+        fontweight="bold",
+        color=INK,
+    )
+    ax.set_xlabel("Share of assigned reviews (%)")
+    ax.set_ylabel("Ranked topic")
+    ax.bar_label(bars, fmt="%.1f%%", padding=4, fontsize=9)
+
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+
     fig.tight_layout()
     return fig
 
@@ -404,9 +580,39 @@ FLANT5BASE_RESULTS = {
     "confusion_image": WWW / "flan_t5_confusion_matrix.png",
 }
 
+def _topic_model_result(model_name: str) -> dict:
+    selected = TOPIC_MODEL_METRICS[
+        TOPIC_MODEL_METRICS["model"]
+        .astype(str)
+        .str.casefold()
+        .eq(model_name.casefold())
+    ]
+
+    if selected.empty:
+        return {
+            "kind": "topic_model",
+            "model_name": model_name,
+            "available": False,
+        }
+
+    row = selected.iloc[0].to_dict()
+    return {
+        "kind": "topic_model",
+        "model_name": model_name,
+        "available": True,
+        **row,
+    }
+
+
+BERTOPIC_RESULTS = _topic_model_result("BERTopic")
+FASTOPIC_RESULTS = _topic_model_result("FASTopic")
+
+
 RESULTS = {
     "DistilBERT": DISTILBERT_RESULTS,
     "FlanT5": FLANT5BASE_RESULTS,
+    "BERTopic": BERTOPIC_RESULTS,
+    "FASTopic": FASTOPIC_RESULTS,
 }
 
 
@@ -726,6 +932,45 @@ ui.layout_columns(
     ui.output_ui("summary_card"),
     ui.output_plot("sentiment_bar_graph"),
 )
+topic_page = ui.TagList(
+    ui.layout_columns(
+        ui.value_box(
+            "Ranked topics displayed",
+            ui.output_text("topic_count"),
+        ),
+        ui.value_box(
+            "Assigned reviews represented",
+            ui.output_text("topic_assigned_review_count"),
+        ),
+        ui.value_box(
+            "Most frequent topic",
+            ui.output_text("top_topic_value"),
+        ),
+        col_widths=[4, 4, 4],
+    ),
+    ui.card(
+        ui.card_header("Topic-frequency chart"),
+        ui.output_plot(
+            "topic_frequency_plot",
+            height="500px",
+        ),
+        class_="mb-4",
+    ),
+    ui.layout_columns(
+        ui.card(
+            ui.card_header("Ranked topics"),
+            ui.output_data_frame("ranked_topics_table"),
+        ),
+        ui.card(
+            ui.card_header("Representative keywords"),
+            ui.output_ui("representative_keywords"),
+        ),
+        col_widths=[7, 5],
+    ),
+
+)
+
+
 home_tab = ui.nav_panel(
     "Home",
     ui.tags.style(CSS),
@@ -762,7 +1007,7 @@ home_tab = ui.nav_panel(
                     ui.input_select(
                         "task",
                         "Task",
-                        choices=["Emotion Classification", "Sentiment Analysis/Summarization"],
+                        choices=["Emotion Classification", "Sentiment Analysis/Summarization", "Topic Modeling"],
                         selected="Emotion Classification",
                         width="100%",
                     ),
@@ -770,7 +1015,8 @@ home_tab = ui.nav_panel(
                 ),
                 ui.navset_hidden(
                     ui.nav_panel("Sentiment Analysis/Summarization", sentiment_page),
-                    ui.nav_panel("Emotion Classification",emotion_page),
+                    ui.nav_panel("Emotion Classification", emotion_page),
+                    ui.nav_panel("Topic Modeling", topic_page),
                     id="page",
                 ),
                 col_widths=[8, 4],
@@ -982,23 +1228,30 @@ models_tab = ui.nav_panel(
                     choices=list(RESULTS),
                     selected="DistilBERT",
                 ),
-                ui.input_select(
-                    "chart",
-                    "Chart",
-                    choices=MODEL_CHARTS["DistilBERT"],
-                    selected=MODEL_CHARTS["DistilBERT"][0],
+                ui.panel_conditional(
+                    "input.model !== 'BERTopic' && input.model !== 'FASTopic'",
+                    ui.input_select(
+                        "chart",
+                        "Chart",
+                        choices=MODEL_CHARTS["DistilBERT"],
+                        selected=MODEL_CHARTS["DistilBERT"][0],
+                    ),
+                    ui.input_switch("annotate", "Annotate values", True),
                 ),
-                ui.input_switch("annotate", "Annotate values", True),
+                
                 ui.hr(),
                 width=280,
             ),
             ui.output_ui("metric_boxes"),
-            ui.card(
-                ui.card_header("Selected chart"),
-                ui.output_plot("model_plot", height="520px"),
+            ui.panel_conditional(
+                "input.model !== 'BERTopic' && input.model !== 'FASTopic'",
+                ui.card(
+                    ui.card_header("Selected chart"),
+                    ui.output_plot("model_plot", height="520px"),
+                ),
             ),
             ui.card(
-                ui.card_header("Class-specific metrics"),
+                ui.card_header("Detailed metrics"),
                 ui.output_data_frame("class_metrics"),
             ),
             ui.card(
@@ -1295,6 +1548,200 @@ def server(input, output, session):
             selected_business_name(),
         )
 
+    @reactive.calc
+    def selected_business_topics() -> pd.DataFrame:
+        """Aggregate BERTopic results across locations sharing the selected name."""
+        business_name = selected_business_name()
+
+        if BUSINESS_TOPICS.empty:
+            return pd.DataFrame()
+
+        selected = BUSINESS_TOPICS[
+            BUSINESS_TOPICS["business_name"].eq(business_name)
+        ].copy()
+
+        if selected.empty:
+            return selected
+
+        selected["topic_review_count"] = pd.to_numeric(
+            selected["topic_review_count"],
+            errors="coerce",
+        ).fillna(0)
+
+        if "average_topic_score" not in selected.columns:
+            selected["average_topic_score"] = np.nan
+
+        selected["average_topic_score"] = pd.to_numeric(
+            selected["average_topic_score"],
+            errors="coerce",
+        )
+
+        selected["_weighted_score"] = (
+            selected["average_topic_score"].fillna(0)
+            * selected["topic_review_count"]
+        )
+
+        grouped = (
+            selected.groupby(
+                ["topic_id", "topic_label"],
+                as_index=False,
+                dropna=False,
+            )
+            .agg(
+                topic_review_count=("topic_review_count", "sum"),
+                weighted_score=("_weighted_score", "sum"),
+                score_weight=("average_topic_score", lambda values: values.notna().sum()),
+            )
+        )
+
+        grouped["average_topic_score"] = np.where(
+            grouped["topic_review_count"] > 0,
+            grouped["weighted_score"] / grouped["topic_review_count"],
+            np.nan,
+        )
+
+        total_assigned = grouped["topic_review_count"].sum()
+        grouped["topic_share"] = np.where(
+            total_assigned > 0,
+            grouped["topic_review_count"] / total_assigned,
+            0,
+        )
+
+        grouped = (
+            grouped.sort_values(
+                ["topic_review_count", "topic_label"],
+                ascending=[False, True],
+            )
+            .head(5)
+            .reset_index(drop=True)
+        )
+        grouped["topic_rank"] = np.arange(1, len(grouped) + 1)
+
+        grouped["representative_keywords"] = grouped.apply(
+            lambda row: BERTOPIC_WORDS_BY_ID.get(
+                int(row["topic_id"]),
+                str(row["topic_label"]),
+            ),
+            axis=1,
+        )
+
+        return grouped
+
+
+    @render.text
+    def topic_count():
+        return f"{len(selected_business_topics()):,}"
+
+
+    @render.text
+    def topic_assigned_review_count():
+        rows = selected_business_topics()
+        if rows.empty:
+            return "0"
+        return f"{int(rows['topic_review_count'].sum()):,}"
+
+
+    @render.text
+    def top_topic_value():
+        rows = selected_business_topics()
+        if rows.empty:
+            return "Not available"
+        return str(rows.iloc[0]["topic_label"])
+
+
+    @render.plot
+    def topic_frequency_plot():
+        return plot_topic_frequency(
+            selected_business_topics(),
+            selected_business_name(),
+        )
+
+
+    @render.data_frame
+    def ranked_topics_table():
+        rows = selected_business_topics()
+
+        if rows.empty:
+            table = pd.DataFrame(
+                {
+                    "Information": [
+                        "No precomputed BERTopic results are available "
+                        "for this business."
+                    ]
+                }
+            )
+        else:
+            table = rows[
+                [
+                    "topic_rank",
+                    "topic_label",
+                    "topic_review_count",
+                    "topic_share",
+                    "average_topic_score",
+                ]
+            ].copy()
+            table.columns = [
+                "Rank",
+                "Topic",
+                "Reviews",
+                "Share",
+                "Average score",
+            ]
+            table["Share"] = table["Share"].map(
+                lambda value: f"{float(value):.1%}"
+            )
+            table["Average score"] = table["Average score"].map(
+                lambda value: (
+                    f"{float(value):.3f}"
+                    if pd.notna(value)
+                    else "N/A"
+                )
+            )
+
+        return render.DataGrid(table, width="100%")
+
+
+    @render.ui
+    def representative_keywords():
+        rows = selected_business_topics()
+
+        if rows.empty:
+            missing_path = BUSINESS_TOPICS_PATH
+            return ui.p(
+                "No BERTopic keyword results are available. "
+                f"Expected output file: {missing_path}",
+                class_="hitcount",
+            )
+
+        items = []
+        for _, row in rows.iterrows():
+            keywords = [
+                keyword.strip()
+                for keyword in str(
+                    row["representative_keywords"]
+                ).split(",")
+                if keyword.strip()
+            ]
+
+            items.append(
+                ui.div(
+                    ui.h5(
+                        f"#{int(row['topic_rank'])} "
+                        f"{row['topic_label']}"
+                    ),
+                    ui.div(
+                        *[
+                            ui.span(keyword, class_="chip")
+                            for keyword in keywords
+                        ]
+                    ),
+                    class_="mb-3",
+                )
+            )
+
+        return ui.TagList(*items)
+
+
     @reactive.effect
     def _sync_page():
         ui.update_navs("page", selected=input.task())
@@ -1306,6 +1753,9 @@ def server(input, output, session):
     @reactive.effect
     def update_chart_choices():
         model_name = input.model()
+        if model_name not in MODEL_CHARTS:
+            return
+
         choices = MODEL_CHARTS[model_name]
         ui.update_select(
             "chart",
@@ -1315,14 +1765,39 @@ def server(input, output, session):
 
     @render.plot
     def model_plot():
+        res = current()
+        if res["kind"] == "topic_model":
+            return None
+
         return PLOTTERS[input.chart()](
-            current(),
+            res,
             annotate=input.annotate(),
         )
 
     @render.ui
     def metric_boxes():
         res = current()
+
+        if res["kind"] == "topic_model":
+            if not res.get("available", False):
+                return ui.card(
+                    ui.p(
+                        "Topic-model evaluation metrics are unavailable. "
+                        f"Expected file: {TOPIC_MODEL_METRICS_PATH}",
+                        class_="hitcount",
+                    )
+                )
+
+            return ui.layout_columns(
+                ui.value_box("C_v coherence", f"{res['c_v']:.3f}"),
+                ui.value_box("NPMI coherence", f"{res['c_npmi']:.3f}"),
+                ui.value_box("U_Mass coherence", f"{res['u_mass']:.3f}"),
+                ui.value_box(
+                    "Topic diversity",
+                    f"{res['topic_diversity']:.3f}",
+                ),
+                col_widths=[3, 3, 3, 3],
+            )
 
         if res["kind"] == "distilbert" or res["kind"] == "flan-t5":
             return ui.layout_columns(
@@ -1347,6 +1822,62 @@ def server(input, output, session):
     @render.data_frame
     def class_metrics():
         res = current()
+
+        if res["kind"] == "topic_model":
+            if not res.get("available", False):
+                table = pd.DataFrame(
+                    {
+                        "Information": [
+                            "Topic-model evaluation metrics are unavailable. "
+                            f"Expected file: {TOPIC_MODEL_METRICS_PATH}"
+                        ]
+                    }
+                )
+            else:
+                metric_rows = [
+                    ("Fit documents", res.get("fit_documents"), "Reviews used to fit the model"),
+                    ("Number of topics", res.get("number_of_topics"), "Topics discovered or requested"),
+                    ("C_v coherence", res.get("c_v"), "Higher is better"),
+                    ("NPMI coherence", res.get("c_npmi"), "Higher is better"),
+                    ("U_Mass coherence", res.get("u_mass"), "Higher, or closer to zero, is better"),
+                    ("Topic diversity", res.get("topic_diversity"), "Higher is better"),
+                    ("Fit time (seconds)", res.get("fit_seconds"), "Lower is faster"),
+                    (
+                        "Outlier rate",
+                        res.get("outlier_rate"),
+                        "BERTopic topic -1 rate; not applicable to FASTopic",
+                    ),
+                    ("C_v rank", res.get("c_v_rank"), "1 is best"),
+                    ("NPMI rank", res.get("c_npmi_rank"), "1 is best"),
+                    ("U_Mass rank", res.get("u_mass_rank"), "1 is best"),
+                    (
+                        "Topic-diversity rank",
+                        res.get("topic_diversity_rank"),
+                        "1 is best",
+                    ),
+                    (
+                        "Mean quality rank",
+                        res.get("mean_quality_rank"),
+                        "Lower is better",
+                    ),
+                ]
+
+                table = pd.DataFrame(
+                    metric_rows,
+                    columns=["Metric", "Value", "Interpretation"],
+                )
+
+                def format_metric_value(value):
+                    if value is None or pd.isna(value):
+                        return "N/A"
+                    if isinstance(value, (int, np.integer)):
+                        return f"{int(value):,}"
+                    return f"{float(value):.4f}"
+
+                table["Value"] = table["Value"].map(format_metric_value)
+
+            return render.DataGrid(table, width="100%")
+
         if res["kind"] == "distilbert" or res["kind"] == "flan-t5":
             table = res["class_metrics"].copy()
             for column in ["Precision", "Recall", "F1"]:
@@ -1369,32 +1900,70 @@ def server(input, output, session):
         rows = []
 
         for name, res in RESULTS.items():
-            if res["kind"] == "distilbert" or res["kind"] == "flan-t5":
+            if res["kind"] in {"distilbert", "flan-t5"}:
                 rows.append(
                     {
                         "Model": name,
+                        "Task": "Sentiment classification",
                         "Accuracy": round(res["accuracy"], 3),
-                        "Macro precision": round(res["precision_macro"], 3),
-                        "Macro recall": round(res["recall_macro"], 3),
                         "Macro F1": round(res["f1_macro"], 3),
                         "Weighted F1": round(res["f1_weighted"], 3),
-                        "Test loss": round(res["test_loss"], 3),
+                        "C_v": None,
+                        "NPMI": None,
+                        "U_Mass": None,
+                        "Topic diversity": None,
+                        "Fit seconds": None,
+                        "Outlier rate": None,
                     }
                 )
-            else:
+            elif res["kind"] == "topic_model":
                 rows.append(
                     {
                         "Model": name,
-                        "Accuracy": round(binary_accuracy(res), 3),
-                        "Macro precision": None,
-                        "Macro recall": None,
+                        "Task": "Topic modeling",
+                        "Accuracy": None,
                         "Macro F1": None,
                         "Weighted F1": None,
-                        "Test loss": round(float(res["val_loss"].min()), 3),
+                        "C_v": (
+                            round(float(res["c_v"]), 3)
+                            if res.get("available")
+                            else None
+                        ),
+                        "NPMI": (
+                            round(float(res["c_npmi"]), 3)
+                            if res.get("available")
+                            else None
+                        ),
+                        "U_Mass": (
+                            round(float(res["u_mass"]), 3)
+                            if res.get("available")
+                            else None
+                        ),
+                        "Topic diversity": (
+                            round(float(res["topic_diversity"]), 3)
+                            if res.get("available")
+                            else None
+                        ),
+                        "Fit seconds": (
+                            round(float(res["fit_seconds"]), 1)
+                            if res.get("available")
+                            else None
+                        ),
+                        "Outlier rate": (
+                            round(float(res["outlier_rate"]), 3)
+                            if (
+                                res.get("available")
+                                and pd.notna(res.get("outlier_rate"))
+                            )
+                            else None
+                        ),
                     }
                 )
 
-        return render.DataGrid(pd.DataFrame(rows), width="100%")
+        return render.DataGrid(
+            pd.DataFrame(rows),
+            width="100%",
+        )
 
     @render.data_frame
     def data_table():
