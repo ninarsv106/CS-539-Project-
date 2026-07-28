@@ -373,7 +373,7 @@ FLANT5BASE_RESULTS = {
     "precision_weighted": 0.9231384424960315,
     "recall_weighted": 0.9250749250749251,
     "f1_weighted": 0.9240340018788193,
-    "test_loss": 0.6769743502140045,
+    "test_loss": 0.691561,
     "confusion_matrix": {
         "labels": [
             "negative",
@@ -399,8 +399,8 @@ FLANT5BASE_RESULTS = {
         ]
     },
     "class_names": ["Negative", "Neutral", "Positive"],
-    "class_metrics": DISTILBERT_CLASS_METRICS,
-    "loss_image": WWW / "class_metric_report.png",
+    "class_metrics": FLANT5_CLASS_METRICS,
+    "loss_image": WWW / "flant5_learning_curve.png",
     "confusion_image": WWW / "flan_t5_confusion_matrix.png",
 }
 
@@ -533,7 +533,7 @@ def plot_confusion(res, annotate=True):
 
 
 def plot_learning_curve(res, annotate=True):
-    if res["kind"] == "distilbert":
+    if res["kind"] == "distilbert" or res["kind"] == "flan-t5":
         image_path = res["loss_image"]
         if not image_path.exists():
             raise FileNotFoundError(
@@ -634,6 +634,7 @@ MODEL_CHARTS = {
         "Class precision, recall, and F1",
     ],
     "FlanT5": [
+        "Training and validation loss",
         "Confusion matrix",
         "Class precision, recall, and F1",
     ]
@@ -1346,7 +1347,6 @@ def server(input, output, session):
     @render.data_frame
     def class_metrics():
         res = current()
-
         if res["kind"] == "distilbert" or res["kind"] == "flan-t5":
             table = res["class_metrics"].copy()
             for column in ["Precision", "Recall", "F1"]:
