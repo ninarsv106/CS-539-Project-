@@ -349,14 +349,64 @@ DISTILBERT_RESULTS = {
     "loss_image": WWW / "distilbert_yelp_ca_training_validation_loss.png",
     "confusion_image": WWW / "distilbert_yelp_ca_confusion_matrix.png",
 }
-
+FLANT5_CLASS_METRICS = pd.DataFrame(
+    [
+        {"Class": "Negative", "Precision": 0.9032258064516129, "Recall": 0.9081081081081082,
+         "F1": 0.9056603773584906, "Support": 185.0},
+        {"Class": "Neutral", "Precision": 0.632183908045977, "Recall":  0.5913978494623656,
+         "F1": 0.6111111111111112, "Support": 93.0},
+        {"Class": "Positive", "Precision":0.9656593406593407, "Recall": 0.9723374827109267,
+         "F1": 0.968986905582357, "Support": 723.0},
+        {"Class": "Macro average", "Precision":  0.8336896850523102, "Recall": 0.8239478134271335,
+         "F1": 0.828586131350653, "Support":  1001.0},
+        {"Class": "Weighted average", "Precision": 0.9231384424960315, "Recall": 0.9250749250749251,
+         "F1": 0.9240340018788193, "Support": 1001.0},
+    ]
+)
+FLANT5BASE_RESULTS = {
+    "kind": "flan-t5",
+    "model_name": "flan-t5-base",
+    "accuracy": 0.9250749250749251,
+    "precision_macro": 0.8336896850523102,
+    "recall_macro": 0.8239478134271335,
+    "f1_macro": 0.828586131350653,
+    "precision_weighted": 0.9231384424960315,
+    "recall_weighted": 0.9250749250749251,
+    "f1_weighted": 0.9240340018788193,
+    "test_loss": 0.6769743502140045,
+    "confusion_matrix": {
+        "labels": [
+            "negative",
+            "neutral",
+            "positive"
+        ],
+        "matrix": [
+            [
+                168,
+                14,
+                3
+            ],
+            [
+                16,
+                55,
+                22
+            ],
+            [
+                2,
+                18,
+                703
+            ]
+        ]
+    },
+    "class_names": ["Negative", "Neutral", "Positive"],
+    "class_metrics": DISTILBERT_CLASS_METRICS,
+    "loss_image": WWW / "class_metric_report.png",
+    "confusion_image": WWW / "flan_t5_confusion_matrix.png",
+}
 
 RESULTS = {
     "DistilBERT": DISTILBERT_RESULTS,
-    "Logistic regression": _fake_results(1, 0.55),
-    "Random forest": _fake_results(2, 0.75),
-    "Gradient boosting": _fake_results(3, 0.88),
-    "Neural net (MLP)": _fake_results(4, 0.80),
+    "FlanT5": FLANT5BASE_RESULTS,
 }
 
 
@@ -428,7 +478,7 @@ def plot_roc(res, annotate=True):
 
 
 def plot_confusion(res, annotate=True):
-    if res["kind"] == "distilbert":
+    if res["kind"] == "distilbert" or res["kind"] == "flan-t5":
         image_path = res["confusion_image"]
         if image_path.exists():
             return plot_static_notebook_image(image_path)
@@ -511,13 +561,13 @@ def plot_learning_curve(res, annotate=True):
 
 
 def plot_class_metrics(res, annotate=True):
-    if res["kind"] != "distilbert":
+    if res["kind"] != "distilbert" and res["kind"] != "flan-t5":
         fig, ax = plt.subplots(figsize=(7, 4.5))
         ax.text(
             0.5,
             0.5,
             "Class-specific precision, recall, and F1\n"
-            "are available for the DistilBERT model.",
+            "are available for the DistilBERT model, and FLAN-T5 model.",
             ha="center",
             va="center",
             fontsize=13,
@@ -583,26 +633,10 @@ MODEL_CHARTS = {
         "Confusion matrix",
         "Class precision, recall, and F1",
     ],
-    "Logistic regression": [
-        "ROC curve",
+    "FlanT5": [
         "Confusion matrix",
-        "Training and validation loss",
-    ],
-    "Random forest": [
-        "ROC curve",
-        "Confusion matrix",
-        "Training and validation loss",
-    ],
-    "Gradient boosting": [
-        "ROC curve",
-        "Confusion matrix",
-        "Training and validation loss",
-    ],
-    "Neural net (MLP)": [
-        "ROC curve",
-        "Confusion matrix",
-        "Training and validation loss",
-    ],
+        "Class precision, recall, and F1",
+    ]
 }
 
 
@@ -1289,7 +1323,7 @@ def server(input, output, session):
     def metric_boxes():
         res = current()
 
-        if res["kind"] == "distilbert":
+        if res["kind"] == "distilbert" or res["kind"] == "flan-t5":
             return ui.layout_columns(
                 ui.value_box("Accuracy", f"{res['accuracy']:.1%}"),
                 ui.value_box("Macro F1", f"{res['f1_macro']:.3f}"),
@@ -1313,7 +1347,7 @@ def server(input, output, session):
     def class_metrics():
         res = current()
 
-        if res["kind"] == "distilbert":
+        if res["kind"] == "distilbert" or res["kind"] == "flan-t5":
             table = res["class_metrics"].copy()
             for column in ["Precision", "Recall", "F1"]:
                 table[column] = table[column].map(lambda value: f"{value:.3f}")
@@ -1323,7 +1357,7 @@ def server(input, output, session):
                 {
                     "Information": [
                         "Class-specific metrics are currently available "
-                        "for DistilBERT."
+                        "for DistilBERT, and Flan-T5.",
                     ]
                 }
             )
@@ -1335,7 +1369,7 @@ def server(input, output, session):
         rows = []
 
         for name, res in RESULTS.items():
-            if res["kind"] == "distilbert":
+            if res["kind"] == "distilbert" or res["kind"] == "flan-t5":
                 rows.append(
                     {
                         "Model": name,
