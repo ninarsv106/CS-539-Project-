@@ -120,6 +120,20 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "datafiles"
 CLEAN_REVIEWS_PATH = DATA_DIR / "yelp_reviews_clean_CA.csv"
 EMOTION_REVIEWS_PATH = DATA_DIR / "yelp_reviews_with_hf_emotions.csv"
 EMOTION_SUMMARY_PATH = DATA_DIR / "yelp_all_business_emotion_summary.csv"
+TOPIC_MODEL_CONFIG = {
+    "BERTopic": {
+        "index_path": DATA_DIR / "bertopic_index.csv",
+        "results_dir": DATA_DIR / "bertopic_results",
+        "kind": "bertopic_topic_model",
+        "bar_color": ACCENT,
+    },
+    "FASTopic": {
+        "index_path": DATA_DIR / "fastopic_index.csv",
+        "results_dir": DATA_DIR / "fastopic_results",
+        "kind": "fastopic_topic_model",
+        "bar_color": WARM,
+    },
+}
 
 EMOTIONS = [
     "anger",
@@ -147,7 +161,13 @@ def require_data_file(path: Path, description: str) -> Path:
 require_data_file(CLEAN_REVIEWS_PATH, "Cleaned Yelp review CSV")
 require_data_file(EMOTION_REVIEWS_PATH, "Review-level emotion CSV")
 require_data_file(EMOTION_SUMMARY_PATH, "Business-level emotion summary CSV")
-
+for model_name, config in TOPIC_MODEL_CONFIG.items():
+    require_data_file(config["index_path"], f"{model_name} business-level index CSV")
+    if not config["results_dir"].exists():
+        raise FileNotFoundError(
+            f"{model_name} per-business results directory was not found:\n{config['results_dir']}\n\n"
+            f"Copy the {config['results_dir'].name} folder into the repository's datafiles directory."
+        )
 # Used by the Data tab.
 LOCAL_PATH_DATA = pl.read_csv(CLEAN_REVIEWS_PATH)
 
@@ -168,6 +188,28 @@ EMOTION_SUMMARY = (
     .unique(subset=["business_name"], keep="first")
     .sort("business_name")
 )
+
+def load_topic_index(index_path: Path) -> pl.DataFrame:
+    return (
+        pl.read_csv(index_path)
+        .with_columns(
+            pl.col("business_id").cast(pl.Utf8),
+            pl.col("business_name").cast(pl.Utf8).str.strip_chars(),
+            pl.col("num_reviews").cast(pl.Int64, strict=False),
+            pl.col("skipped").cast(pl.Boolean, strict=False),
+            *[
+                pl.col(col).cast(pl.Float64, strict=False)
+                for col in ["coherence_cv", "coherence_npmi", "coherence_umass", "diversity"]
+            ],
+        )
+        .filter(~pl.col("skipped").fill_null(False))
+        .drop_nulls(subset=["business_name"])
+        .unique(subset=["business_name"], keep="first")
+        .sort("business_name")
+    )
+
+for model_name, config in TOPIC_MODEL_CONFIG.items():
+    config["index"] = load_topic_index(config["index_path"])
 
 BUSINESS_CHOICES = EMOTION_SUMMARY.get_column("business_name").to_list()
 
@@ -262,6 +304,39 @@ def plot_emotion_histogram(
     fig.tight_layout()
     return fig
 
+def load_topic_result(results_dir: Path, business_id: str) -> dict | None:
+    import pickle
+    path = results_dir / f"{business_id}.pkl"
+    if not path.exists():
+        return None
+    with open(path, "rb") as f:
+        return pickle.load(f)
+
+
+def plot_topic_bars(result: dict, business_name: str, bar_color: str, top_n_topics: int = 10):
+    topic_words = result.get("topic_words", [])
+    topic_counts = result.get("topic_counts", {})
+
+    fig, ax = plt.subplots(figsize=(8, max(3, min(top_n_topics, len(topic_counts)) * 0.45)))
+
+    if not topic_counts:
+        ax.text(0.5, 0.5, "No topics available for this business.",
+                ha="center", va="center", fontsize=12, color=MUTED)
+        ax.axis("off")
+        return fig
+
+    sorted_topics = sorted(topic_counts.items(), key=lambda x: x[1], reverse=True)[:top_n_topics]
+    labels = [", ".join(topic_words[tid][:3]) if tid < len(topic_words) else f"Topic {tid}"
+              for tid, _ in sorted_topics]
+    sizes = [count for _, count in sorted_topics]
+
+    ax.barh(labels[::-1], sizes[::-1], color=bar_color)
+    ax.set_xlabel("Number of Reviews")
+    ax.set_title(f"Frequently Discussed Topics — {business_name}", loc="left", fontweight="bold", color=INK)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    fig.tight_layout()
+    return fig
 
 # --------------------------------------------------------------------------- #
 # Model results
@@ -372,6 +447,23 @@ def _frame(ax, title, xlabel, ylabel):
     for side in ("left", "bottom"):
         ax.spines[side].set_color("#dfe4e7")
 
+def topic_aggregate_results(model_name: str) -> dict:
+    config = TOPIC_MODEL_CONFIG[model_name]
+    index = config["index"]
+    return {
+        "kind": config["kind"],
+        "coherence_cv": index.get_column("coherence_cv").drop_nulls().to_numpy(),
+        "coherence_npmi": index.get_column("coherence_npmi").drop_nulls().to_numpy(),
+        "coherence_umass": index.get_column("coherence_umass").drop_nulls().to_numpy(),
+        "diversity": index.get_column("diversity").drop_nulls().to_numpy(),
+    }
+
+TOPIC_METRIC_LABELS = [
+    ("coherence_cv", "C_V Coherence"),
+    ("coherence_npmi", "NPMI Coherence"),
+    ("coherence_umass", "U_Mass Coherence"),
+    ("diversity", "Topic Diversity"),
+]
 
 def plot_static_notebook_image(path: Path):
     fig, ax = plt.subplots(figsize=(8, 5.2))
@@ -541,6 +633,27 @@ def plot_class_metrics(res, annotate=True):
     fig.tight_layout()
     return fig
 
+def plot_topic_mean_metric(res, metric_key, title, annotate=True):
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    values = res[metric_key]
+    mean_val = float(np.mean(values)) if len(values) else 0.0
+    ax.bar([title], [mean_val], color=ACCENT, width=0.5)
+    if annotate:
+        ax.text(0, mean_val, f"{mean_val:.4f}", ha="center", va="bottom",
+                fontsize=12, fontweight="bold", color=INK)
+    _frame(ax, f"Mean {title} across businesses", "", title)
+    return fig
+
+
+def plot_topic_distribution(res, annotate=True):
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    ax.boxplot(
+        [res["coherence_cv"], res["coherence_npmi"], res["coherence_umass"]],
+        tick_labels=["C_V", "NPMI", "U_Mass"],
+    )
+    _frame(ax, "Coherence distribution across all businesses", "", "Score")
+    return fig
+
 
 PLOTTERS = {
     "ROC curve": plot_roc,
@@ -577,6 +690,22 @@ MODEL_CHARTS = {
     ],
 }
 
+for model_name, config in TOPIC_MODEL_CONFIG.items():
+    RESULTS[model_name] = topic_aggregate_results(model_name)
+
+    chart_names = []
+    for metric_key, label in TOPIC_METRIC_LABELS:
+        chart_name = f" Mean {label}" if metric_key != "diversity" else f"{label}"
+        PLOTTERS[chart_name] = (
+            lambda res, annotate=True, mk=metric_key, lb=label: plot_topic_mean_metric(res, mk, lb, annotate)
+        )
+        chart_names.append(chart_name)
+
+    dist_chart_name = "Coherence Distribution"
+    PLOTTERS[dist_chart_name] = plot_topic_distribution
+    chart_names.append(dist_chart_name)
+
+    MODEL_CHARTS[model_name] = chart_names
 
 # --------------------------------------------------------------------------- #
 # UI — all layout in one place, which is the reason to prefer Core here
@@ -654,6 +783,19 @@ home_tab = ui.nav_panel(
             ),
             class_="mb-4",
         ),
+        *[
+            ui.card(
+                ui.card_header(f"Frequently discussed topics ({model_name})"),
+                ui.output_plot(f"{model_name.lower()}_topic_bar", height="480px"),
+                ui.p(
+                    ui.output_text(f"{model_name.lower()}_status_note", inline=True),
+                    class_="data-note",
+                ),
+                ui.output_data_frame(f"{model_name.lower()}_keyword_table"),
+                class_="mb-4",
+            )
+            for model_name in TOPIC_MODEL_CONFIG
+        ],
         ui.h3("Review-level emotion score distributions", class_="mt-4 mb-3"),
         ui.layout_columns(
             *[
@@ -944,6 +1086,58 @@ def server(input, output, session):
         selected = input.business_name()
         return selected.strip() if selected else DEFAULT_BUSINESS
 
+    def make_topic_tab_outputs(model_name: str, config: dict):
+        prefix = model_name.lower()
+
+        @reactive.calc
+        def business_id():
+            business_name = selected_business_name()
+            match = config["index"].filter(pl.col("business_name") == business_name)
+            if match.is_empty():
+                return None
+            return match.get_column("business_id")[0]
+
+        @reactive.calc
+        def result():
+            biz_id = business_id()
+            if biz_id is None:
+                return None
+            return load_topic_result(config["results_dir"], biz_id)
+
+        def topic_bar():
+            r = result()
+            business_name = selected_business_name()
+            if r is None:
+                fig, ax = plt.subplots(figsize=(8, 3))
+                ax.text(0.5, 0.5, f"No {model_name} results available for this business.",
+                        ha="center", va="center", fontsize=12, color=MUTED)
+                ax.axis("off")
+                return fig
+            return plot_topic_bars(r, business_name, config["bar_color"])
+
+        def status_note():
+            r = result()
+            if r is None:
+                return ""
+            return f"{len(r.get('topic_words', []))} topics discovered from {r.get('num_reviews', 0)} reviews."
+
+        def keyword_table():
+            r = result()
+            if r is None:
+                return render.DataGrid(pd.DataFrame({"Information": ["No topics available."]}), width="100%")
+            rows = [
+                {"Topic": i, "Keywords": ", ".join(words[:8])}
+                for i, words in enumerate(r.get("topic_words", []))
+            ]
+            return render.DataGrid(pd.DataFrame(rows), width="100%")
+
+        output(render.plot(topic_bar), id=f"{prefix}_topic_bar")
+        output(render.text(status_note), id=f"{prefix}_status_note")
+        output(render.data_frame(keyword_table), id=f"{prefix}_keyword_table")
+
+    for model_name, config in TOPIC_MODEL_CONFIG.items():
+        make_topic_tab_outputs(model_name, config)
+
     @reactive.calc
     def selected_business_summary() -> dict:
         business_name = selected_business_name()
@@ -1102,6 +1296,15 @@ def server(input, output, session):
                 col_widths=[3, 3, 3, 3],
             )
 
+        if res["kind"] in ("bertopic_topic_model", "fastopic_topic_model"):
+            return ui.layout_columns(
+                ui.value_box("Mean C_V", f"{np.mean(res['coherence_cv']):.4f}"),
+                ui.value_box("Mean NPMI", f"{np.mean(res['coherence_npmi']):.4f}"),
+                ui.value_box("Mean U_Mass", f"{np.mean(res['coherence_umass']):.4f}"),
+                ui.value_box("Mean Diversity", f"{np.mean(res['diversity']):.4f}"),
+                col_widths=[3, 3, 3, 3],
+            )
+
         fpr, tpr = roc_points(res["y_true"], res["y_score"])
         return ui.layout_columns(
             ui.value_box("AUC", f"{auc(fpr, tpr):.3f}"),
@@ -1151,6 +1354,20 @@ def server(input, output, session):
                         "Test loss": round(res["test_loss"], 3),
                     }
                 )
+
+            elif res["kind"] in ("bertopic_topic_model", "fastopic_topic_model"):
+                rows.append(
+                    {
+                        "Model": name,
+                        "Accuracy": None,
+                        "Macro precision": None,
+                        "Macro recall": None,
+                        "Macro F1": None,
+                        "Weighted F1": None,
+                        "Test loss": None,
+                    }
+                )
+
             else:
                 rows.append(
                     {
