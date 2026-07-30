@@ -256,15 +256,6 @@ if not BUSINESS_TOPICS.empty:
                 errors="coerce",
             )
 
-    # The dashboard intentionally uses only the BERTopic inference export.
-    if "model" in BUSINESS_TOPICS.columns:
-        BUSINESS_TOPICS = BUSINESS_TOPICS[
-            BUSINESS_TOPICS["model"]
-            .astype(str)
-            .str.casefold()
-            .eq("bertopic")
-        ].copy()
-
 
 BERTOPIC_TOPICS = _read_optional_csv(
     BERTOPIC_TOPICS_PATH,
@@ -285,8 +276,8 @@ if not BERTOPIC_TOPICS.empty:
         ].copy()
 
 
-BERTOPIC_WORDS_BY_ID = {
-    int(row["topic_id"]): str(row["top_words"])
+TOPIC_WORDS_BY_MODEL_AND_ID = {
+    (str(row["model"]).casefold(), int(row["topic_id"])): str(row["top_words"])
     for _, row in BERTOPIC_TOPICS.dropna(subset=["topic_id"]).iterrows()
 }
 
@@ -305,14 +296,6 @@ TOPIC_MODEL_METRICS = _read_optional_csv(
         "outlier_rate",
     },
 )
-
-if not TOPIC_MODEL_METRICS.empty:
-    for column in TOPIC_MODEL_METRICS.columns:
-        if column != "model":
-            TOPIC_MODEL_METRICS[column] = pd.to_numeric(
-                TOPIC_MODEL_METRICS[column],
-                errors="coerce",
-            )
 
 
 emotion_businesses = EMOTION_SUMMARY.get_column("business_name").to_list()
@@ -825,12 +808,59 @@ def plot_class_metrics(res, annotate=True):
     fig.tight_layout()
     return fig
 
+def plot_topic_metric_comparison(metric_key, title, annotate=True):
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+
+    bertopic_res = RESULTS.get("BERTopic", {})
+    fastopic_res = RESULTS.get("FASTopic", {})
+
+    labels = []
+    values = []
+    if bertopic_res.get("available", False):
+        labels.append("BERTopic")
+        values.append(float(bertopic_res[metric_key]))
+    if fastopic_res.get("available", False):
+        labels.append("FASTopic")
+        values.append(float(fastopic_res[metric_key]))
+
+    if not values:
+        ax.text(0.5, 0.5, "No topic-model metrics available yet.",
+                ha="center", va="center", fontsize=12, color=MUTED)
+        ax.axis("off")
+        return fig
+
+    bars = ax.bar(labels, values, color=[ACCENT, WARM][:len(values)], width=0.5)
+    if annotate:
+        for bar in bars:
+            height = bar.get_height()
+            ax.annotate(f"{height:.4f}", xy=(bar.get_x() + bar.get_width()/2, height),
+                        xytext=(0, 3), textcoords="offset points", ha="center", va="bottom")
+    _frame(ax, f"{title}: BERTopic vs FASTopic", "", title)
+    return fig
+
+
+def plot_topic_cv_comparison(res, annotate=True):
+    return plot_topic_metric_comparison("c_v", "C_V Coherence", annotate)
+
+def plot_topic_npmi_comparison(res, annotate=True):
+    return plot_topic_metric_comparison("c_npmi", "NPMI Coherence", annotate)
+
+def plot_topic_umass_comparison(res, annotate=True):
+    return plot_topic_metric_comparison("u_mass", "U_Mass Coherence", annotate)
+
+def plot_topic_diversity_comparison(res, annotate=True):
+    return plot_topic_metric_comparison("topic_diversity", "Topic Diversity", annotate)
+
 
 PLOTTERS = {
     "ROC curve": plot_roc,
     "Confusion matrix": plot_confusion,
     "Training and validation loss": plot_learning_curve,
     "Class precision, recall, and F1": plot_class_metrics,
+    "C_v Coherence": plot_topic_cv_comparison,
+    "NPMI Coherence": plot_topic_npmi_comparison,
+    "U_Mass Coherence": plot_topic_umass_comparison,
+    "Topic Diversity": plot_topic_diversity_comparison
 }
 
 MODEL_CHARTS = {
@@ -843,6 +873,18 @@ MODEL_CHARTS = {
         "Training and validation loss",
         "Confusion matrix",
         "Class precision, recall, and F1",
+    ],
+    "BERTopic": [
+        "C_v Coherence",
+        "NPMI Coherence",
+        "U_Mass Coherence",
+        "Topic Diversity",
+    ],
+    "FASTopic": [
+        "C_v Coherence",
+        "NPMI Coherence",
+        "U_Mass Coherence",
+        "Topic Diversity",
     ]
 }
 
@@ -933,6 +975,11 @@ ui.layout_columns(
     ui.output_plot("sentiment_bar_graph"),
 )
 topic_page = ui.TagList(
+    ui.input_radio_buttons(
+        "topic_model_choice", "Model:",
+        {"BERTopic": "BERTopic", "FASTopic": "FASTopic"},
+        selected="BERTopic",
+    ),
     ui.layout_columns(
         ui.value_box(
             "Ranked topics displayed",
@@ -1015,7 +1062,7 @@ home_tab = ui.nav_panel(
                 ),
                 ui.navset_hidden(
                     ui.nav_panel("Sentiment Analysis/Summarization", sentiment_page),
-                    ui.nav_panel("Emotion Classification", emotion_page),
+                    ui.nav_panel("Emotion Classification",emotion_page),
                     ui.nav_panel("Topic Modeling", topic_page),
                     id="page",
                 ),
@@ -1228,8 +1275,6 @@ models_tab = ui.nav_panel(
                     choices=list(RESULTS),
                     selected="DistilBERT",
                 ),
-                ui.panel_conditional(
-                    "input.model !== 'BERTopic' && input.model !== 'FASTopic'",
                     ui.input_select(
                         "chart",
                         "Chart",
@@ -1237,19 +1282,15 @@ models_tab = ui.nav_panel(
                         selected=MODEL_CHARTS["DistilBERT"][0],
                     ),
                     ui.input_switch("annotate", "Annotate values", True),
-                ),
-                
+
                 ui.hr(),
                 width=280,
             ),
             ui.output_ui("metric_boxes"),
-            ui.panel_conditional(
-                "input.model !== 'BERTopic' && input.model !== 'FASTopic'",
                 ui.card(
                     ui.card_header("Selected chart"),
                     ui.output_plot("model_plot", height="520px"),
                 ),
-            ),
             ui.card(
                 ui.card_header("Detailed metrics"),
                 ui.output_data_frame("class_metrics"),
@@ -1556,9 +1597,12 @@ def server(input, output, session):
         if BUSINESS_TOPICS.empty:
             return pd.DataFrame()
 
+        selected_model = input.topic_model_choice()
+
         selected = BUSINESS_TOPICS[
             BUSINESS_TOPICS["business_name"].eq(business_name)
-        ].copy()
+            & BUSINESS_TOPICS["model"].astype(str).str.casefold().eq(selected_model.casefold())
+            ].copy()
 
         if selected.empty:
             return selected
@@ -1618,8 +1662,8 @@ def server(input, output, session):
         grouped["topic_rank"] = np.arange(1, len(grouped) + 1)
 
         grouped["representative_keywords"] = grouped.apply(
-            lambda row: BERTOPIC_WORDS_BY_ID.get(
-                int(row["topic_id"]),
+            lambda row: TOPIC_WORDS_BY_MODEL_AND_ID.get(
+                (selected_model.casefold(), int(row["topic_id"])),
                 str(row["topic_label"]),
             ),
             axis=1,
@@ -1766,8 +1810,6 @@ def server(input, output, session):
     @render.plot
     def model_plot():
         res = current()
-        if res["kind"] == "topic_model":
-            return None
 
         return PLOTTERS[input.chart()](
             res,
